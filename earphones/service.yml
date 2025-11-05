@@ -1,1 +1,11 @@
-# Earphones service configuration
+apiVersion: v1
+kind: Service
+metadata:
+  name: earphones-service
+spec:
+  type: ClusterIP
+  selector:
+    app: earphones
+  ports:
+  - port: 80
+    targetPort: 80
