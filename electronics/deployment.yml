@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
       - name: electronics
-        image: 049061799945.dkr.ecr.ap-northeast-1.amazonaws.com/google-store-electronics:49ce596ae21a4ad5b298446c99ae9e63bff978da
+        image: 049061799945.dkr.ecr.ap-northeast-1.amazonaws.com/google-store-electronics:e52e3161d87fa3ba44ecb498d1d276ab6f4e04c7
         ports:
         - containerPort: 80
