@@ -36,76 +36,88 @@ jobs:
       - name: 📦 Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 4. Update main deployment.yml with latest image (optional if needed)
-      - name: 💾 Update main deployment
+      # 4. Build, tag, and push Docker images
+      - name: 🛠 Build & push Docker images
         run: |
-          IMAGE_TAG="${{ github.sha }}"
-          sed -i "s|image:.*|image: $ECR_REGISTRY/google-store-frontend:$IMAGE_TAG|g" deployment.yml
-
-      # 5. Build, tag, and push Docker images for all services
-      - name: 🛠 Build, tag, and push Docker images
-        run: |
+          set -e
+          IMAGE_TAG="${GITHUB_SHA}"
+          
           for service in $SERVICES; do
+            # Determine folder
+            if [ "$service" = "frontend" ]; then
+              FOLDER="."
+            elif [ "$service" = "backend" ]; then
+              FOLDER="Backend"
+            else
+              FOLDER="$service"
+            fi
+
+            # Skip if Dockerfile doesn't exist
+            if [ ! -f "$FOLDER/Dockerfile" ]; then
+              echo "⚠️  Skipping $service, no Dockerfile found"
+              continue
+            fi
+
             REPO_NAME="google-store-$service"
-            IMAGE_TAG="${GITHUB_SHA}"
+            IMAGE_URI="$ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG"
 
             # Create ECR repo if it doesn't exist
-            aws ecr describe-repositories --repository-names $REPO_NAME || \
+            aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1 || \
               aws ecr create-repository --repository-name $REPO_NAME
 
-            # Build Docker image
-            docker build -t $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG ./$service
-
-            # Push Docker image to ECR
-            docker push $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG
+            # Build and push Docker image
+            docker build -t $IMAGE_URI $FOLDER
+            docker push $IMAGE_URI
 
             # Update deployment.yml if exists
-            if [ -f $service/deployment.yml ]; then
-              sed -i "s|image:.*|image: $ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG|g" $service/deployment.yml
+            DEPLOY_YML="$FOLDER/deployment.yml"
+            BACKEND_DEPLOY_YML="$FOLDER/backend-deployment.yml"
+
+            if [ -f "$DEPLOY_YML" ]; then
+              sed -i "s|image:.*|image: $IMAGE_URI|g" "$DEPLOY_YML"
+            elif [ -f "$BACKEND_DEPLOY_YML" ]; then
+              sed -i "s|image:.*|image: $IMAGE_URI|g" "$BACKEND_DEPLOY_YML"
             fi
           done
 
-      # 6. Commit updated deployment files
+      # 5. Commit updated deployment files
       - name: 🔄 Commit updated deployment files
         run: |
           git config --global user.name 'GitHub Actions'
           git config --global user.email 'actions@github.com'
-          git add */deployment.yml deployment.yml
+          git add */deployment.yml Backend/backend-deployment.yml deployment.yml
           git commit -m "Update image tags in deployment files" || echo "No changes to commit"
           git push || echo "Push failed, probably due to permissions"
 
-      # 7. Configure kubectl for EKS
+      # 6. Configure kubectl for EKS
       - name: ☸️ Connect to EKS cluster
         run: |
           aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION --alias github-actions
           kubectl config use-context github-actions
           kubectl get nodes
 
-      # 8. Deploy all Kubernetes manifests
-      - name: 🚀 Deploy to Kubernetes
+      # 7. Deploy all Kubernetes manifests
+      - name: 🚀 Apply Kubernetes manifests
         run: |
+          set -e
           for service in $SERVICES; do
-            if [ -f $service/service.yml ]; then
-              kubectl apply -f $service/service.yml -n $K8S_NAMESPACE
-            fi
-            if [ -f $service/deployment.yml ]; then
-              kubectl apply -f $service/deployment.yml -n $K8S_NAMESPACE
-            fi
-            if [ -f $service/autoscaler.yml ]; then
-              kubectl apply -f $service/autoscaler.yml -n $K8S_NAMESPACE
-            fi
-          done
+            if [ "$service" = "frontend" ]; then FOLDER="."; 
+            elif [ "$service" = "backend" ]; then FOLDER="Backend"; 
+            else FOLDER="$service"; fi
 
-          # Apply main frontend
-          kubectl apply -f deployment.yml -n $K8S_NAMESPACE
-          kubectl apply -f service.yml -n $K8S_NAMESPACE
+            for file in service.yml deployment.yml autoscaler.yml backend-deployment.yml backend-service.yml; do
+              if [ -f "$FOLDER/$file" ]; then
+                kubectl apply -f "$FOLDER/$file" -n $K8S_NAMESPACE
+              fi
+            done
+          done
 
           # Apply ingress for path-based routing
           if [ -f ingress.yml ]; then
             kubectl apply -f ingress.yml -n $K8S_NAMESPACE --validate=false
           fi
 
-      # 9. Verify deployed resources
+      # 8. Verify deployed resources
       - name: ✅ Verify deployment
         run: |
           kubectl get pods,svc,ingress -n $K8S_NAMESPACE
