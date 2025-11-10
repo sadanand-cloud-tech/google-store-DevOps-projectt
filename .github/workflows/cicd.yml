@@ -1,4 +1,4 @@
-name: CI/CD for Google Store (Multi-Service - EC2 + ECR)
+name: CI/CD for Shopping Site (Multi-Service)
 
 on:
   push:
@@ -6,132 +6,78 @@ on:
       - main
 
 env:
-  AWS_REGION: ap-northeast-1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-1.amazonaws.com
-  SERVICES: "electronics phones computers earphones payment backend"
-
-permissions:
-  contents: write
+  AWS_REGION: ap-south-1                    # 🔹 Change to your AWS region
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-south-1.amazonaws.com
+  EC2_USER: ec2-user                        # 🔹 Default for Amazon Linux
+  EC2_HOST: ${{ secrets.EC2_HOST }}         # 🔹 EC2 Public IP/DNS
+  PEM_FILE: google-shop.pem                 # 🔹 Your EC2 PEM key file
+  SERVICES: "main electronics phones computers earphones payment"
+  PROJECT_DIR: shopping-site
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout code
-      - name: 🧾 Checkout repository
+      - name: 🧾 Checkout code
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GIT_PAT }}
 
-      # 2️⃣ Configure AWS credentials
-      - name: 🔧 Configure AWS credentials
+      - name: ⚙️ Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 3️⃣ Verify AWS identity
-      - name: 🔍 Verify AWS Identity
-        run: aws sts get-caller-identity
-
-      # 4️⃣ Login to ECR
-      - name: 📦 Login to Amazon ECR
+      - name: 🐳 Login to Amazon ECR
+        id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 5️⃣ Build & push images for all services
-      - name: 🛠 Build & push Docker images
-        id: build_push
+      - name: 📦 Build & Push Docker Images
         run: |
-          set -e
-          IMAGE_TAG="${GITHUB_SHA}"
-
-          echo "" > image_map.txt
-
-          for service in $SERVICES; do
-            if [ "$service" = "backend" ]; then
-              FOLDER="Backend"
-            else
-              FOLDER="$service"
-            fi
-
-            if [ ! -f "$FOLDER/Dockerfile" ]; then
-              echo "⚠️ Skipping $service (no Dockerfile found)"
-              continue
-            fi
-
-            REPO_NAME="google-store-$service"
-            IMAGE_URI="$ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG"
-
-            echo "🚀 Building image for $service..."
-            aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1 || \
-              aws ecr create-repository --repository-name $REPO_NAME
-
-            docker build -t $IMAGE_URI $FOLDER
-            docker push $IMAGE_URI
-
-            echo "$service=$IMAGE_URI" >> image_map.txt
-
-            # Update all YAML files for that service
-            for yaml in deployment.yml service.yml autoscaler.yml; do
-              if [ -f "$FOLDER/$yaml" ]; then
-                sed -i "s|image:.*|image: $IMAGE_URI|g" "$FOLDER/$yaml"
-              fi
-            done
+          for SERVICE in $SERVICES; do
+            echo "🚀 Building $SERVICE..."
+            cd $PROJECT_DIR/$SERVICE 2>/dev/null || cd $PROJECT_DIR
+            IMAGE_TAG=${ECR_REGISTRY}/${SERVICE}:latest
+            docker build -t $IMAGE_TAG .
+            docker push $IMAGE_TAG
+            cd - >/dev/null
           done
 
-          echo "✅ All images built and pushed successfully."
-
-      # 6️⃣ Commit updated YAMLs to GitHub
-      - name: 🔄 Commit updated Kubernetes manifests
+      - name: 📂 Update YAML with New Image Tags
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add */*.yml Backend/*.yml || true
-          git commit -m "🔄 Auto-update image URIs for all services" || echo "No changes to commit"
-          git push origin main || echo "⚠️ No changes to push"
+          for SERVICE in $SERVICES; do
+            FILE_PATH="$PROJECT_DIR/$SERVICE/deployment.yml"
+            if [ -f "$FILE_PATH" ]; then
+              echo "📝 Updating image for $SERVICE"
+              sed -i "s|image:.*|image: ${ECR_REGISTRY}/${SERVICE}:latest|g" $FILE_PATH
+            fi
+          done
 
-      # 7️⃣ SSH into EC2 and deploy
-      - name: 🚀 Deploy to EC2
+      - name: 🔐 Setup SSH key for EC2
+        run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > $PEM_FILE
+          chmod 600 $PEM_FILE
+
+      - name: 🚀 Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            echo "🚀 Starting deployment on EC2..."
-            cd /home/ec2-user
+            echo "📦 Cloning latest code..."
+            cd /home/${{ env.EC2_USER }}
+            rm -rf ${{ env.PROJECT_DIR }}
+            git clone https://github.com/${{ github.repository }}.git
+            cd ${{ env.PROJECT_DIR }}
 
-            if [ -d "google-store" ]; then
-              echo "🔄 Pulling latest repository changes..."
-              cd google-store
-              git pull origin main
-            else
-              echo "📦 Cloning repository..."
-              git clone https://github.com/${{ github.repository }} google-store
-              cd google-store
-            fi
+            echo "🐳 Applying Kubernetes configurations..."
+            kubectl apply -f ingress.yml
+            for SERVICE in $SERVICES; do
+              kubectl apply -f $SERVICE/deployment.yml
+              kubectl apply -f $SERVICE/service.yml
+              kubectl apply -f $SERVICE/autoscaler.yml
+            done
 
-            echo "📁 Updating image references from image_map.txt..."
-            while IFS="=" read -r service image_uri; do
-              if [ -z "$service" ] || [ -z "$image_uri" ]; then continue; fi
-              if [ "$service" = "backend" ]; then
-                FOLDER="Backend"
-              else
-                FOLDER="$service"
-              fi
-
-              for yaml in deployment.yml service.yml autoscaler.yml; do
-                if [ -f "$FOLDER/$yaml" ]; then
-                  sed -i "s|image:.*|image: $image_uri|g" "$FOLDER/$yaml"
-                fi
-              done
-            done < <(cat image_map.txt || true)
-
-            echo "🐳 Rebuilding and restarting Docker containers..."
-            docker compose down || true
-            docker compose up -d --build
-
-            echo "✅ EC2 deployment complete!"
-
+            echo "✅ Deployment completed successfully!"
