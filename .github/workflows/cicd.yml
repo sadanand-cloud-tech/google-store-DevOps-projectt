@@ -1,24 +1,26 @@
-name: CI/CD for Google Store (Build & Push Only)
+name: CI/CD for Google Store (Build, Push & Clone in Server)
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch: # manual trigger support
 
 env:
   AWS_REGION: ap-northeast-1
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-1.amazonaws.com
   SERVICES: "frontend electronics phones computers earphones backend"
+  SERVER_DIR: /home/ec2-user/google-store  # folder on your server
 
 permissions:
   contents: write
 
 jobs:
-  build-and-push:
+  build-push-clone:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo using Personal Access Token (for commit push)
+      # 1️⃣ Checkout repo using PAT (for pushing commits)
       - name: 🧾 Checkout repository
         uses: actions/checkout@v4
         with:
@@ -32,15 +34,15 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 3️⃣ Show IAM identity (debug)
+      # 3️⃣ Verify AWS identity (optional debug)
       - name: 🔍 Check AWS Identity
         run: aws sts get-caller-identity
 
-      # 4️⃣ Login to Amazon ECR
+      # 4️⃣ Login to ECR
       - name: 📦 Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 5️⃣ Build, Tag & Push Docker Images
+      # 5️⃣ Build, Tag, and Push Docker Images (frontend + backend + others)
       - name: 🛠 Build & push Docker images
         run: |
           set -e
@@ -56,25 +58,25 @@ jobs:
             fi
 
             if [ ! -f "$FOLDER/Dockerfile" ]; then
-              echo "⚠️ Skipping $service (no Dockerfile found)"
+              echo "⚠️ Skipping $service (no Dockerfile)"
               continue
             fi
 
             REPO_NAME="google-store-$service"
             IMAGE_URI="$ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG"
 
-            # Create ECR repo if missing
             aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1 || \
               aws ecr create-repository --repository-name $REPO_NAME
 
-            echo "🚀 Building $service image..."
+            echo "🚀 Building $service ..."
             docker build -t $IMAGE_URI $FOLDER
             docker push $IMAGE_URI
 
-            # Update image references in YAML files
+            echo "✅ Pushed: $IMAGE_URI"
+
+            # Update image reference
             DEPLOY_YML="$FOLDER/deployment.yml"
             BACKEND_DEPLOY_YML="$FOLDER/backend-deployment.yml"
-
             if [ -f "$DEPLOY_YML" ]; then
               sed -i "s|image:.*|image: $IMAGE_URI|g" "$DEPLOY_YML"
             elif [ -f "$BACKEND_DEPLOY_YML" ]; then
@@ -82,11 +84,34 @@ jobs:
             fi
           done
 
-      # 6️⃣ Commit and push updated manifests
+      # 6️⃣ Commit updated YAML files
       - name: 🔄 Commit updated deployment manifests
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add */deployment.yml Backend/backend-deployment.yml deployment.yml || true
           git commit -m "🔄 Auto-update image tags after build" || echo "No changes to commit"
-          git push origin main || echo "⚠️ Git push skipped (no changes)"
+          git push origin main || echo "⚠️ No changes to push"
+
+      # 7️⃣ SSH into EC2 and clone/pull updated repo
+      - name: 🌐 Clone or update repo on EC2 server
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/ec2-user || exit 1
+
+            if [ -d "${SERVER_DIR}" ]; then
+              echo "🔁 Repository exists — pulling latest changes..."
+              cd "${SERVER_DIR}"
+              git pull origin main
+            else
+              echo "📦 Cloning fresh repository..."
+              git clone https://github.com/${{ github.repository }} "${SERVER_DIR}"
+            fi
+
+            cd "${SERVER_DIR}"
+            echo "✅ Repository is up to date on the server."
