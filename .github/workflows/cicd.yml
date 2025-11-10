@@ -4,8 +4,8 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - '**/deployment.yml'   # 🚫 Prevent re-trigger when only image tags are updated
+    # ❌ Removed paths-ignore so commits push again
+    # ✅ We'll control looping in another way
 
 env:
   AWS_REGION: ap-northeast-1
@@ -89,14 +89,18 @@ jobs:
 
           git add frontend/**/deployment.yml backend/backend-deployment.yml
 
-          # Add skip ci to avoid retrigger
-          git commit -m "🔄 Update image tags after build [skip ci]" || echo "No changes to commit"
+          # Commit once with skip ci
+          git commit -m "🔄 Update image tags after build [skip ci]" || echo "⚠️ No YAML changes"
+          git push origin main || echo "⚠️ No changes to push"
 
-          # Only push if there are actual changes
-          git diff --quiet && echo "⚠️ No changes detected, skipping push." || git push origin main
+      # ✅ Stop loop if commit was made by GitHub Actions
+      - name: 🧠 Skip loop if commit was automated
+        if: contains(github.event.head_commit.message, '[skip ci]')
+        run: echo "Skipping re-triggered build due to [skip ci] commit"
 
       # 6️⃣ SSH Deploy to EC2
       - name: 🚀 Deploy on EC2
+        if: ${{ !contains(github.event.head_commit.message, '[skip ci]') }}
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
