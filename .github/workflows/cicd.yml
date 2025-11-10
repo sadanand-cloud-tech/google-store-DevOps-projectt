@@ -1,26 +1,26 @@
-name: CI/CD for Google Store (Build, Push & Clone in Server)
+name: CI/CD for Google Store (Full Stack)
 
 on:
   push:
     branches:
       - main
-  workflow_dispatch: # manual trigger support
 
 env:
   AWS_REGION: ap-northeast-1
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.ap-northeast-1.amazonaws.com
   SERVICES: "frontend electronics phones computers earphones backend"
-  SERVER_DIR: /home/ec2-user/google-store  # folder on your server
+  K8S_NAMESPACE: default
+  CLUSTER_NAME: abinash
 
 permissions:
   contents: write
 
 jobs:
-  build-push-clone:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ Checkout repo using PAT (for pushing commits)
+      # 1️⃣ Checkout code
       - name: 🧾 Checkout repository
         uses: actions/checkout@v4
         with:
@@ -34,15 +34,15 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 3️⃣ Verify AWS identity (optional debug)
-      - name: 🔍 Check AWS Identity
+      # 3️⃣ Check AWS Identity
+      - name: 🔍 Verify AWS Identity
         run: aws sts get-caller-identity
 
       # 4️⃣ Login to ECR
       - name: 📦 Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 5️⃣ Build, Tag, and Push Docker Images (frontend + backend + others)
+      # 5️⃣ Build, Tag & Push Docker Images
       - name: 🛠 Build & push Docker images
         run: |
           set -e
@@ -58,23 +58,22 @@ jobs:
             fi
 
             if [ ! -f "$FOLDER/Dockerfile" ]; then
-              echo "⚠️ Skipping $service (no Dockerfile)"
+              echo "⚠️ Skipping $service (no Dockerfile found)"
               continue
             fi
 
             REPO_NAME="google-store-$service"
             IMAGE_URI="$ECR_REGISTRY/$REPO_NAME:$IMAGE_TAG"
 
+            # Create ECR repo if it doesn't exist
             aws ecr describe-repositories --repository-names $REPO_NAME >/dev/null 2>&1 || \
               aws ecr create-repository --repository-name $REPO_NAME
 
-            echo "🚀 Building $service ..."
+            echo "🚀 Building $service image..."
             docker build -t $IMAGE_URI $FOLDER
             docker push $IMAGE_URI
 
-            echo "✅ Pushed: $IMAGE_URI"
-
-            # Update image reference
+            # Update image in YAML manifests
             DEPLOY_YML="$FOLDER/deployment.yml"
             BACKEND_DEPLOY_YML="$FOLDER/backend-deployment.yml"
             if [ -f "$DEPLOY_YML" ]; then
@@ -84,35 +83,71 @@ jobs:
             fi
           done
 
-      # 6️⃣ Commit updated YAML files
+      # 6️⃣ Commit updated image references to repo
       - name: 🔄 Commit updated deployment manifests
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
           git add */deployment.yml Backend/backend-deployment.yml deployment.yml || true
           git commit -m "🔄 Auto-update image tags after build" || echo "No changes to commit"
-          git push origin main || echo "⚠️ No changes to push"
+          git push origin main || echo "⚠️ Git push skipped (no changes)"
 
-      # 7️⃣ SSH into EC2 and clone/pull updated repo
-      - name: 🌐 Clone or update repo on EC2 server
+      # 7️⃣ Configure kubectl for EKS
+      - name: ☸️ Configure kubectl for EKS
+        run: |
+          aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION --alias github-actions
+          kubectl config use-context github-actions
+          kubectl cluster-info
+
+      # 8️⃣ Apply all Kubernetes manifests
+      - name: 🚀 Apply Kubernetes manifests to EKS
+        run: |
+          set -e
+          echo "📦 Deploying manifests to EKS..."
+
+          for service in $SERVICES; do
+            if [ "$service" = "frontend" ]; then FOLDER="."
+            elif [ "$service" = "backend" ]; then FOLDER="Backend"
+            else FOLDER="$service"; fi
+
+            for file in service.yml deployment.yml autoscaler.yml backend-deployment.yml backend-service.yml; do
+              if [ -f "$FOLDER/$file" ]; then
+                echo "➡️ Applying $FOLDER/$file ..."
+                kubectl apply -f "$FOLDER/$file" -n $K8S_NAMESPACE || true
+              fi
+            done
+          done
+
+          if [ -f ingress.yml ]; then
+            echo "🌐 Applying ingress.yml ..."
+            kubectl apply -f ingress.yml -n $K8S_NAMESPACE --validate=false || true
+          fi
+
+      # 9️⃣ SSH into EC2 to pull repo and deploy Docker containers
+      - name: 🔑 Deploy to EC2 via SSH
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ec2-user
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
-            cd /home/ec2-user || exit 1
+            echo "🚀 Deploying Google Store App on EC2..."
 
-            if [ -d "${SERVER_DIR}" ]; then
-              echo "🔁 Repository exists — pulling latest changes..."
-              cd "${SERVER_DIR}"
+            cd /home/ec2-user
+
+            # Clone or update repo
+            if [ -d "google-store" ]; then
+              echo "🔄 Pulling latest changes..."
+              cd google-store
               git pull origin main
             else
-              echo "📦 Cloning fresh repository..."
-              git clone https://github.com/${{ github.repository }} "${SERVER_DIR}"
+              echo "📦 Cloning repository..."
+              git clone https://github.com/${{ github.repository }} google-store
+              cd google-store
             fi
 
-            cd "${SERVER_DIR}"
-            echo "✅ Repository is up to date on the server."
+            echo "🐳 Building and starting Docker containers..."
+            docker compose down || true
+            docker compose up -d --build
 
+            echo "✅ EC2 deployment complete!"
