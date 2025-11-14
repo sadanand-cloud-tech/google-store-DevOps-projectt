@@ -16,6 +16,7 @@ spec:
                 name: main-service
                 port:
                   number: 80
+
           - path: /electronics
             pathType: Prefix
             backend:
@@ -23,6 +24,7 @@ spec:
                 name: electronics-service
                 port:
                   number: 80
+
           - path: /phones
             pathType: Prefix
             backend:
@@ -30,6 +32,7 @@ spec:
                 name: phones-service
                 port:
                   number: 80
+
           - path: /computers
             pathType: Prefix
             backend:
@@ -37,6 +40,7 @@ spec:
                 name: computers-service
                 port:
                   number: 80
+
           - path: /googlemusic
             pathType: Prefix
             backend:
@@ -44,6 +48,7 @@ spec:
                 name: googlemusic-service
                 port:
                   number: 80
+
           - path: /earphones
             pathType: Prefix
             backend:
@@ -51,10 +56,19 @@ spec:
                 name: earphones-service
                 port:
                   number: 80
+
           - path: /payment
             pathType: Prefix
             backend:
               service:
                 name: payment-service
+                port:
+                  number: 80
+
+          - path: /googlepay
+            pathType: Prefix
+            backend:
+              service:
+                name: googlepay-service
                 port:
                   number: 80
