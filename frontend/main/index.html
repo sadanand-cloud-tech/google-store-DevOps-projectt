@@ -668,6 +668,37 @@
     // Track if the user is authenticated in this session
     let isLoggedIn = false;
 
+    // --- Persistence for 5 min login session ---
+    const USER_KEY = "googleStoreUser";
+    const LOGIN_EXPIRE_MINUTES = 5; // 5 minutes
+
+    function saveUserSession(user) {
+      // user: {username, email}
+      const data = { ...user, t: Date.now() };
+      localStorage.setItem(USER_KEY, JSON.stringify(data));
+    }
+    function loadUserSession() {
+      const data = localStorage.getItem(USER_KEY);
+      if (!data) return null;
+      try {
+        const parsed = JSON.parse(data);
+        if (!parsed.username || !parsed.email || !parsed.t) return null;
+        // Check time
+        if (Date.now() - parsed.t > LOGIN_EXPIRE_MINUTES * 60000) {
+          // Expired
+          localStorage.removeItem(USER_KEY);
+          return null;
+        }
+        return { username: parsed.username, email: parsed.email };
+      } catch (e) {
+        localStorage.removeItem(USER_KEY);
+        return null;
+      }
+    }
+    function clearUserSession() {
+      localStorage.removeItem(USER_KEY);
+    }
+
     function showMessage(text, type) {
       msgBox.textContent = text;
       msgBox.className = `message ${type}`;
@@ -694,6 +725,12 @@
 
     // Attach modal open/close events and click interception logic
     document.addEventListener('DOMContentLoaded', function() {
+      // If remembered session, auto-login!
+      const remembered = loadUserSession();
+      if (remembered) {
+        onUserAuthenticated(remembered);
+      }
+
       // Handle Login/Sign Up buttons
       navbarLoginBtn.onclick = function() {
         openAuthModal('login');
@@ -879,6 +916,8 @@
       navbarLoginBtn.style.display = 'none';
       navbarSignupBtn.style.display = 'none';
       isLoggedIn = true;
+      // Save to localStorage for 5 min
+      saveUserSession({ username, email });
     }
 
     // Hide profile in navbar, restore login/signup
@@ -888,6 +927,7 @@
       navbarLoginBtn.style.display = 'inline-block';
       navbarSignupBtn.style.display = 'inline-block';
       isLoggedIn = false;
+      clearUserSession();
     }
 
     function logout() {
